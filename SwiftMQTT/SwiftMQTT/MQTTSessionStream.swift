@@ -17,63 +17,42 @@ protocol MQTTSessionStreamDelegate: class {
 class MQTTSessionStream: NSObject {
     
     private var currentRunLoop: RunLoop?
-    private let inputStream: InputStream?
-    private let outputStream: OutputStream?
+    private var inputStream: InputStream?
+    private var outputStream: OutputStream?
     private var sessionQueue: DispatchQueue
     private weak var delegate: MQTTSessionStreamDelegate?
+    private var session: URLSession? = nil
+    private var streamTask: URLSessionStreamTask? = nil
 
     private var inputReady = false
     private var outputReady = false
+    private var timeout: TimeInterval
     
     init(host: String, port: UInt16, ssl: Bool, timeout: TimeInterval, delegate: MQTTSessionStreamDelegate?) {
-        var inputStream: InputStream?
-        var outputStream: OutputStream?
-        Stream.getStreamsToHost(withName: host, port: Int(port), inputStream: &inputStream, outputStream: &outputStream)
-        
+        self.timeout = timeout
         let queueLabel = host.components(separatedBy: ".").reversed().joined(separator: ".") + ".stream\(port)"
         self.sessionQueue = DispatchQueue(label: queueLabel, qos: .background, target: nil)
         self.delegate = delegate
-        self.inputStream = inputStream
-        self.outputStream = outputStream
 
         super.init()
         
-        inputStream?.delegate = self
-        outputStream?.delegate = self
-
-        sessionQueue.async { [weak self] in
-
-            guard let `self` = self else {
-                return
-            }
-
-            self.currentRunLoop = RunLoop.current
-            inputStream?.schedule(in: self.currentRunLoop!, forMode: .defaultRunLoopMode)
-            outputStream?.schedule(in: self.currentRunLoop!, forMode: .defaultRunLoopMode)
-
-            inputStream?.open()
-            outputStream?.open()
-            if ssl {
-                let securityLevel = StreamSocketSecurityLevel.negotiatedSSL.rawValue
-                inputStream?.setProperty(securityLevel, forKey: .socketSecurityLevelKey)
-                outputStream?.setProperty(securityLevel, forKey: .socketSecurityLevelKey)
-            }
-            if timeout > 0 {
-                DispatchQueue.global().asyncAfter(deadline: .now() +  timeout) {
-                    self.connectTimeout()
-                }
-            }
-            self.currentRunLoop!.run()
+        session = URLSession(configuration: URLSessionConfiguration.default, delegate: self, delegateQueue: nil)
+        streamTask = session!.streamTask(withHostName: host, port: Int(port))
+        if ssl {
+            streamTask!.startSecureConnection()
         }
+        streamTask!.captureStreams()
+        streamTask!.resume()
+        
     }
     
     deinit {
         delegate = nil
         guard let currentRunLoop = currentRunLoop else { return }
         inputStream?.close()
-        inputStream?.remove(from: currentRunLoop, forMode: .defaultRunLoopMode)
+        inputStream?.remove(from: currentRunLoop, forMode: .default)
         outputStream?.close()
-        outputStream?.remove(from: currentRunLoop, forMode: .defaultRunLoopMode)
+        outputStream?.remove(from: currentRunLoop, forMode: .default)
     }
     
     var write: StreamWriter? {
@@ -88,6 +67,53 @@ class MQTTSessionStream: NSObject {
             delegate?.mqttReady(false, in: self)
         }
     }
+}
+
+extension MQTTSessionStream: URLSessionStreamDelegate {
+    
+    func urlSession(_ session: URLSession, streamTask: URLSessionStreamTask, didBecome inputStream: InputStream, outputStream: OutputStream) {
+      //setup the streams
+
+        self.inputStream = inputStream
+        self.inputStream!.delegate = self
+        self.outputStream = outputStream
+        self.outputStream!.delegate = self
+        self.sessionQueue.async { [weak self] in
+            guard let `self` = self else {
+              return
+            }
+            self.currentRunLoop = RunLoop.current
+            self.inputStream!.schedule(in: self.currentRunLoop!, forMode: RunLoop.Mode.default)
+            self.outputStream!.schedule(in: self.currentRunLoop!, forMode: RunLoop.Mode.default)
+            self.inputStream!.open()
+            self.outputStream!.open()
+            if self.timeout > 0 {
+                DispatchQueue.global().asyncAfter(deadline: .now() +  self.timeout) {
+                    self.connectTimeout()
+                }
+            }
+            self.currentRunLoop!.run()
+
+        }
+
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
 }
 
 extension MQTTSessionStream: StreamDelegate {
