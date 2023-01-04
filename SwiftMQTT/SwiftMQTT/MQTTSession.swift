@@ -225,6 +225,7 @@ extension MQTTSession: MQTTSessionStreamDelegate {
             cleanupDisconnection(.socketError)
             delegateQueue.async { [weak self] in
                 self?.connectionCompletionBlock?(MQTTSessionError.socketError)
+                self?.connectionCompletionBlock = nil
             }
         }
     }
